@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("8708921630:AAHRcD16E0jmskVkjrAu8Wj-Uo256T-Hj2A")
 ADMIN_ID = 8317899373
 SUPPORT_USERNAME = "ezzy_sol"
 
