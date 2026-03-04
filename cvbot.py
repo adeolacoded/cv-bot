@@ -1,21 +1,18 @@
 import sqlite3
 import logging
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
+    ContextTypes,
     filters,
-    ContextTypes
 )
 
 # ================= CONFIG =================
-TOKEN =  "8708921630:AAHRcD16E0jmskVkjrAu8Wj-Uo256T-Hj2A"
+TOKEN = os.getenv("TOKEN")
 ADMIN_ID = 8317899373
 SUPPORT_USERNAME = "ezzy_sol"
 
@@ -43,39 +40,32 @@ CREATE TABLE IF NOT EXISTS referrals (
 
 conn.commit()
 
-# ================= HELPERS =================
+# ================= DATABASE FUNCTIONS =================
 
 def add_user(user):
     cursor.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
     if not cursor.fetchone():
         cursor.execute(
-            "INSERT INTO users (user_id, username, credits) VALUES (?, ?, ?)",
-            (user.id, user.username, 1)
+            "INSERT INTO users (user_id, username, credits, is_pro) VALUES (?, ?, ?, ?)",
+            (user.id, user.username, 1, 0)
         )
         conn.commit()
 
-def get_credits(user_id):
-    cursor.execute("SELECT credits FROM users WHERE user_id=?", (user_id,))
-    result = cursor.fetchone()
-    return result[0] if result else 0
+def get_user(user_id):
+    cursor.execute("SELECT credits, is_pro FROM users WHERE user_id=?", (user_id,))
+    return cursor.fetchone()
 
 def add_credit(user_id, amount=1):
-    cursor.execute(
-        "UPDATE users SET credits = credits + ? WHERE user_id=?",
-        (amount, user_id)
-    )
+    cursor.execute("UPDATE users SET credits = credits + ? WHERE user_id=?", (amount, user_id))
     conn.commit()
 
 def deduct_credit(user_id):
-    cursor.execute(
-        "UPDATE users SET credits = credits - 1 WHERE user_id=? AND credits > 0",
-        (user_id,)
-    )
+    cursor.execute("UPDATE users SET credits = credits - 1 WHERE user_id=? AND credits > 0", (user_id,))
     conn.commit()
 
-def total_users():
-    cursor.execute("SELECT COUNT(*) FROM users")
-    return cursor.fetchone()[0]
+def activate_pro(user_id):
+    cursor.execute("UPDATE users SET is_pro=1 WHERE user_id=?", (user_id,))
+    conn.commit()
 
 # ================= START =================
 
@@ -83,16 +73,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user)
 
-    # Referral system
+    # Referral
     if context.args:
         referrer_id = int(context.args[0])
         if referrer_id != user.id:
             cursor.execute("SELECT * FROM referrals WHERE referred_id=?", (user.id,))
             if not cursor.fetchone():
-                cursor.execute(
-                    "INSERT INTO referrals VALUES (?, ?)",
-                    (referrer_id, user.id)
-                )
+                cursor.execute("INSERT INTO referrals VALUES (?, ?)", (referrer_id, user.id))
                 add_credit(referrer_id, 1)
                 conn.commit()
 
@@ -105,8 +92,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"Welcome {user.first_name}!\n\n"
-        "You have 1 free CV credit.\n\n"
-        "Use the buttons below to continue.",
+        "You have 1 FREE CV credit.\nUpgrade to PRO for unlimited CV requests.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -115,65 +101,88 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
 
-    if query.data == "create_cv":
-        credits = get_credits(user_id)
+    user_data = get_user(user_id)
+    if not user_data:
+        return
 
-        if credits <= 0:
-            keyboard = [
-                [InlineKeyboardButton("💎 Upgrade to Pro", callback_data="upgrade")]
-            ]
-            await query.message.reply_text(
-                "❌ You have no credits left.\nUpgrade to continue.",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+    credits, is_pro = user_data
+
+    if query.data == "create_cv":
+        if not is_pro and credits <= 0:
+            await query.message.reply_text("❌ No credits left. Upgrade to PRO.")
             return
 
         context.user_data["awaiting_details"] = True
-        await query.message.reply_text(
-            "Please send ALL your CV details in one message."
-        )
+        await query.message.reply_text("Send all your CV details in one message.")
 
     elif query.data == "upgrade":
         await query.message.reply_text(
-            "💎 PRO BENEFITS:\n\n"
-            "- Unlimited CV Requests\n"
-            "- Priority Processing\n"
-            "- Professional Formatting\n\n"
-            "Send payment proof to continue."
+            "💎 PRO UPGRADE\n\n"
+            "Price: ₦1,500\n\n"
+            "Payment Details:\n"
+            "Bank: Opay\n"
+            "Account Name: Oyenekan Ezekiel Adeola\n"
+            "Account Number: 8123465260\n\n"
+            "After payment, send screenshot here.\n"
+            "Admin will confirm and activate PRO."
         )
 
     elif query.data == "dashboard":
-        credits = get_credits(user_id)
+        status = "PRO User (Unlimited)" if is_pro else "Free User"
         await query.message.reply_text(
-            f"📊 Your Dashboard\n\n"
-            f"Credits: {credits}\n"
-            f"Referral Link:\n"
-            f"https://t.me/{context.bot.username}?start={user_id}"
+            f"📊 DASHBOARD\n\nStatus: {status}\nCredits: {credits}\n\n"
+            f"Referral Link:\nhttps://t.me/{context.bot.username}?start={user_id}"
         )
 
     elif query.data.startswith("confirm_"):
         target_id = int(query.data.split("_")[1])
-        deduct_credit(target_id)
+        target_data = get_user(target_id)
+        if target_data:
+            t_credits, t_is_pro = target_data
+            if not t_is_pro:
+                deduct_credit(target_id)
 
         await context.bot.send_message(
             chat_id=target_id,
-            text="✅ Your CV request has been approved.\nYour CV is being prepared."
+            text="✅ CV request approved. Your CV is being prepared."
         )
-
-        await query.message.edit_text("Request confirmed and credit deducted.")
+        await query.message.edit_text("Request confirmed.")
 
     elif query.data.startswith("reject_"):
         target_id = int(query.data.split("_")[1])
+        await context.bot.send_message(
+            chat_id=target_id,
+            text="❌ CV request rejected. Please resend properly."
+        )
+        await query.message.edit_text("Request rejected.")
+
+    elif query.data.startswith("activatepro_"):
+        if user_id != ADMIN_ID:
+            return
+        target_id = int(query.data.split("_")[1])
+        activate_pro(target_id)
 
         await context.bot.send_message(
             chat_id=target_id,
-            text="❌ Your CV request was rejected.\nPlease resubmit correctly."
+            text="🎉 PRO activated! Unlimited CV requests unlocked."
         )
+        await query.message.edit_text("PRO activated.")
 
-        await query.message.edit_text("Request rejected.")
+    elif query.data == "total_users":
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total = cursor.fetchone()[0]
+        await query.message.reply_text(f"👥 Total Users: {total}")
+
+    elif query.data == "total_pro":
+        cursor.execute("SELECT COUNT(*) FROM users WHERE is_pro=1")
+        total = cursor.fetchone()[0]
+        await query.message.reply_text(f"💎 Total PRO Users: {total}")
+
+    elif query.data == "broadcast":
+        context.user_data["broadcast"] = True
+        await query.message.reply_text("Send broadcast message.")
 
 # ================= MESSAGE HANDLER =================
 
@@ -181,38 +190,73 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
-    # If awaiting CV details
+    # Broadcast
+    if context.user_data.get("broadcast") and user_id == ADMIN_ID:
+        context.user_data["broadcast"] = False
+        cursor.execute("SELECT user_id FROM users")
+        users = cursor.fetchall()
+        for u in users:
+            try:
+                await context.bot.send_message(chat_id=u[0], text=update.message.text)
+            except:
+                pass
+        await update.message.reply_text("✅ Broadcast sent.")
+        return
+
+    # CV submission
     if context.user_data.get("awaiting_details"):
         context.user_data["awaiting_details"] = False
 
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_{user_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
-            ]
-        ]
+        keyboard = [[
+            InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_{user_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
+        ]]
 
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"📥 New CV Request\n\nUser: @{user.username}\nID: {user_id}\n\nDetails:\n{update.message.text}",
+            text=f"📥 New CV Request\nUser: @{user.username}\nID: {user_id}\n\n{update.message.text}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-        await update.message.reply_text(
-            "Your CV request has been submitted.\nYou will be notified after review."
-        )
+        await update.message.reply_text("CV request submitted.")
+        return
 
-    # Payment proof forwarding
-    elif update.message.photo or update.message.document:
+    # Payment proof
+    if update.message.photo or update.message.document:
         await context.bot.forward_message(
             chat_id=ADMIN_ID,
             from_chat_id=user_id,
             message_id=update.message.message_id
         )
 
-        await update.message.reply_text(
-            "Payment proof received.\nAwaiting admin confirmation."
+        keyboard = [[
+            InlineKeyboardButton("✅ Activate PRO", callback_data=f"activatepro_{user_id}")
+        ]]
+
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"Payment proof from @{user.username} (ID: {user_id})",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+        await update.message.reply_text("Payment proof received. Awaiting confirmation.")
+
+# ================= ADMIN PANEL =================
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("📊 Total Users", callback_data="total_users")],
+        [InlineKeyboardButton("💎 Total PRO Users", callback_data="total_pro")],
+        [InlineKeyboardButton("📨 Broadcast", callback_data="broadcast")],
+    ]
+
+    await update.message.reply_text(
+        "🔐 ADMIN PANEL",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 # ================= ADMIN SEND CV =================
 
@@ -224,8 +268,7 @@ async def sendcv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /sendcv user_id")
         return
 
-    target_id = int(context.args[0])
-    context.user_data["send_to"] = target_id
+    context.user_data["send_to"] = int(context.args[0])
     await update.message.reply_text("Send the CV file now.")
 
 async def handle_admin_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,10 +289,11 @@ async def handle_admin_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("admin", admin_panel))
 app.add_handler(CommandHandler("sendcv", sendcv))
 app.add_handler(CallbackQueryHandler(button_handler))
 app.add_handler(MessageHandler(filters.ALL, handle_message))
 app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_admin_file))
 
 print("Bot is running...")
-app.run_polling()            
+app.run_polling()
